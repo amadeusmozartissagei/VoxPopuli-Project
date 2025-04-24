@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Anonymous Opinions</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .opinion {
+            border: 1px solid #ddd;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-radius: 5px;
+        }
+        .timestamp {
+            color: #666;
+            font-size: 0.8em;
+        }
+        .media-container {
+            margin-top: 10px;
+        }
+        .media-container img, .media-container video {
+            max-width: 100%;
+            max-height: 300px;
+        }
+        textarea {
+            width: 100%;
+            height: 100px;
+            margin-bottom: 10px;
+        }
+        .error {
+            color: red;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Anonymous Opinions</h1>
+    
+    <div id="post-form">
+        <h2>Share Your Opinion</h2>
+        <div id="error-message" class="error"></div>
+        <textarea id="opinion-content" placeholder="What's on your mind?"></textarea>
+        
+        <div>
+            <label for="media-upload">Add Media (optional):</label>
+            <input type="file" id="media-upload" accept="image/*,video/*">
+        </div>
+        
+        <button id="post-button">Post Opinion</button>
+    </div>
+    
+    <h2>Recent Opinions</h2>
+    <div id="opinions-container"></div>
+    
+    <script>
+        // Connect to the backend canister
+        let anonymousOpinions;
+        
+        async function init() {
+            // This would be replaced with actual canister initialization code
+            // For example, using the generated JavaScript bindings from dfx
+            try {
+                // Placeholder for actual initialization
+                console.log("Initializing connection to backend...");
+                // anonymousOpinions = await AnonymousOpinions.AnonymousOpinions();
+                
+                // Load existing opinions
+                await loadOpinions();
+            } catch (error) {
+                console.error("Failed to initialize:", error);
+            }
+        }
+        
+        async function loadOpinions() {
+            try {
+                // This would call the getAllOpinions query function
+                // const opinions = await anonymousOpinions.getAllOpinions();
+                
+                // For demonstration, using placeholder data
+                const opinions = [
+                    { 
+                        id: 1, 
+                        content: "This is a sample opinion.", 
+                        timestamp: Date.now() * 1000000, 
+                        media: null 
+                    },
+                    { 
+                        id: 0, 
+                        content: "Another sample with an image.", 
+                        timestamp: (Date.now() - 3600000) * 1000000,
+                        media: { 
+                            mediaType: { image: null }, 
+                            content: new Uint8Array() // placeholder
+                        } 
+                    }
+                ];
+                
+                displayOpinions(opinions);
+            } catch (error) {
+                console.error("Failed to load opinions:", error);
+            }
+        }
+        
+        function displayOpinions(opinions) {
+            const container = document.getElementById('opinions-container');
+            container.innerHTML = '';
+            
+            if (opinions.length === 0) {
+                container.innerHTML = '<p>No opinions yet. Be the first to share!</p>';
+                return;
+            }
+            
+            // Sort opinions by timestamp (newest first)
+            opinions.sort((a, b) => Number(b.timestamp) - Number(a.timestamp));
+            
+            for (const opinion of opinions) {
+                const opinionElement = document.createElement('div');
+                opinionElement.className = 'opinion';
+                
+                const date = new Date(Number(opinion.timestamp) / 1000000);
+                
+                opinionElement.innerHTML = `
+                    <p>${opinion.content}</p>
+                    <div class="timestamp">Posted on ${date.toLocaleString()}</div>
+                `;
+                
+                // Add media if present
+                if (opinion.media) {
+                    const mediaContainer = document.createElement('div');
+                    mediaContainer.className = 'media-container';
+                    
+                    if (opinion.media.mediaType.image !== undefined) {
+                        // For a real implementation, you would convert the Blob to a data URL
+                        mediaContainer.innerHTML = `
+                            <img src="placeholder-image.jpg" alt="Opinion image">
+                        `;
+                    } else if (opinion.media.mediaType.video !== undefined) {
+                        mediaContainer.innerHTML = `
+                            <video controls>
+                                <source src="placeholder-video.mp4" type="video/mp4">
+                                Your browser does not support the video tag.
+                            </video>
+                        `;
+                    }
+                    
+                    opinionElement.appendChild(mediaContainer);
+                }
+                
+                container.appendChild(opinionElement);
+            }
+        }
+        
+        async function postOpinion() {
+            const content = document.getElementById('opinion-content').value.trim();
+            const mediaInput = document.getElementById('media-upload');
+            const errorElement = document.getElementById('error-message');
+            
+            errorElement.textContent = '';
+            
+            if (!content) {
+                errorElement.textContent = 'Opinion content cannot be empty';
+                return;
+            }
+            
+            try {
+                let opinionId;
+                
+                if (mediaInput.files.length > 0) {
+                    const file = mediaInput.files[0];
+                    const arrayBuffer = await file.arrayBuffer();
+                    const blobData = new Uint8Array(arrayBuffer);
+                    
+                    if (file.type.startsWith('image/')) {
+                        // Call postOpinionWithImage
+                        // opinionId = await anonymousOpinions.postOpinionWithImage(content, blobData);
+                        console.log("Posting opinion with image...");
+                    } else if (file.type.startsWith('video/')) {
+                        // Call postOpinionWithVideo
+                        // opinionId = await anonymousOpinions.postOpinionWithVideo(content, blobData);
+                        console.log("Posting opinion with video...");
+                    }
+                } else {
+                    // Call postOpinion with no media
+                    // opinionId = await anonymousOpinions.postOpinion(content, null);
+                    console.log("Posting text opinion...");
+                }
+                
+                // Clear the form
+                document.getElementById('opinion-content').value = '';
+                mediaInput.value = '';
+                
+                // Reload opinions to show the new one
+                await loadOpinions();
+                
+            } catch (error) {
+                errorElement.textContent = `Error: ${error.message || 'Failed to post opinion'}`;
+                console.error("Failed to post opinion:", error);
+            }
+        }
+        
+        // Set up event listeners
+        document.getElementById('post-button').addEventListener('click', postOpinion);
+        
+        // Initialize the app
+        init();
+    </script>
+</body>
+</html>
