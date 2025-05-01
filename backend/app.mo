@@ -10,6 +10,7 @@ import Blob "mo:base/Blob";
 import List "mo:base/List";
 import Principal "mo:base/Principal";
 import Array "mo:base/Array"; 
+import Option "mo:base/Option";
 
 actor AnonymousOpinions {
   // Type for storing media
@@ -68,7 +69,7 @@ actor AnonymousOpinions {
   );
 
   // LLM configuration
-  let defaultPrompt = "analisa text ini, dan berikan output 1 jika termasuh hinaan dan berikan output 0 jika tidak terindikasi hinaan. hanya beri saya input 0 atau 1.";
+  let defaultPrompt = "analisa text ini, dan berikan output 1 jika termasuk hinaan dan berikan output 0 jika tidak terindikasi hinaan. hanya beri saya input 0 atau 1.";
   let MAX_INPUT_LENGTH = 280;
 
   // Check content using LLM
@@ -145,7 +146,19 @@ actor AnonymousOpinions {
     return newOpinion.id;
   };
 
-  // Vote on an opinion (upvote or downvote)
+  // Helper function to find a vote in a user's vote list
+  private func findVote(votes: [UserVote], opinionId: Nat) : ?(UserVote, Nat) {
+    var index = 0;
+    for (vote in votes.vals()) {
+      if (vote.opinionId == opinionId) {
+        return ?(vote, index);
+      };
+      index += 1;
+    };
+    null
+  };
+
+  // Improved Vote on an opinion (upvote or downvote)
   public shared(msg) func voteOnOpinion(opinionId: Nat, vote: Vote) : async () {
     let caller = msg.caller;
     
@@ -155,125 +168,78 @@ actor AnonymousOpinions {
         throw Error.reject("Opinion does not exist");
       };
       case (?opinion) {
-        // Check if user has already voted on this opinion
+        // Get user's existing votes
         let userVotesList = switch (userVotes.get(caller)) {
           case null { [] };
           case (?votes) { votes };
         };
         
-        // Check if user has already voted on this opinion
-        for (userVote in userVotesList.vals()) {
-          if (userVote.opinionId == opinionId) {
-            // If user is changing their vote
-            if (userVote.vote != vote) {
-              // Remove the old vote
-              switch (userVote.vote) {
-                case (#up) {
-                  let updatedOpinion = {
-                    id = opinion.id;
-                    content = opinion.content;
-                    timestamp = opinion.timestamp;
-                    media = opinion.media;
-                    upvotes = opinion.upvotes - 1;
-                    downvotes = opinion.downvotes;
-                    parentId = opinion.parentId;
-                  };
-                  opinions.put(opinionId, updatedOpinion);
-                };
-                case (#down) {
-                  let updatedOpinion = {
-                    id = opinion.id;
-                    content = opinion.content;
-                    timestamp = opinion.timestamp;
-                    media = opinion.media;
-                    upvotes = opinion.upvotes;
-                    downvotes = opinion.downvotes - 1;
-                    parentId = opinion.parentId;
-                  };
-                  opinions.put(opinionId, updatedOpinion);
-                };
+        // Find existing vote for this opinion
+        let existingVoteResult = findVote(userVotesList, opinionId);
+        
+        // Updated opinion with modified vote counts
+        var updatedOpinion = opinion;
+        
+        switch (existingVoteResult) {
+          case null {
+            // New vote: increment appropriate counter
+            updatedOpinion := switch (vote) {
+              case (#up) { 
+                { opinion with upvotes = opinion.upvotes + 1 } 
               };
-              
-              // Add the new vote
-              switch (vote) {
-                case (#up) {
-                  let updatedOpinion = {
-                    id = opinion.id;
-                    content = opinion.content;
-                    timestamp = opinion.timestamp;
-                    media = opinion.media;
-                    upvotes = opinion.upvotes + 1;
-                    downvotes = opinion.downvotes;
-                    parentId = opinion.parentId;
-                  };
-                  opinions.put(opinionId, updatedOpinion);
-                };
-                case (#down) {
-                  let updatedOpinion = {
-                    id = opinion.id;
-                    content = opinion.content;
-                    timestamp = opinion.timestamp;
-                    media = opinion.media;
-                    upvotes = opinion.upvotes;
-                    downvotes = opinion.downvotes + 1;
-                    parentId = opinion.parentId;
-                  };
-                  opinions.put(opinionId, updatedOpinion);
-                };
+              case (#down) { 
+                { opinion with downvotes = opinion.downvotes + 1 } 
               };
-              
-              // Update user's vote record
-              let updatedVotes = Array.map<UserVote, UserVote>(
-                userVotesList, 
-                func (uv) {
-                  if (uv.opinionId == opinionId) {
-                    { opinionId = opinionId; vote = vote }
-                  } else {
-                    uv
+            };
+            
+            // Add new vote to user's vote list
+            let updatedVotes = Array.append(
+              userVotesList, 
+              [{ opinionId = opinionId; vote = vote }]
+            );
+            userVotes.put(caller, updatedVotes);
+          };
+          case (?(existingVote, index)) {
+            // If vote is the same, do nothing
+            if (existingVote.vote == vote) return;
+            
+            // Change vote: adjust counters
+            updatedOpinion := switch (existingVote.vote, vote) {
+              case (#up, #down) { 
+                { opinion with 
+                  upvotes = opinion.upvotes - 1; 
+                  downvotes = opinion.downvotes + 1 
+                } 
+              };
+              case (#down, #up) { 
+                { opinion with 
+                  upvotes = opinion.upvotes + 1; 
+                  downvotes = opinion.downvotes - 1 
+                } 
+              };
+              case _ { opinion }; // Impossible case, but needed for exhaustiveness
+            };
+            
+            // Update user's vote
+            let updatedVotes = Array.tabulate<UserVote>(
+              userVotesList.size(), 
+              func(i: Nat) : UserVote { 
+                if (i == index) {
+                  {
+                    opinionId = opinionId;
+                    vote = vote;
                   }
+                } else {
+                  userVotesList[i] 
                 }
-              );
-              userVotes.put(caller, updatedVotes);
-            };
-            return;
+              }
+            );
+            userVotes.put(caller, updatedVotes);
           };
         };
         
-        // User hasn't voted on this opinion yet
-        // Add the vote
-        switch (vote) {
-          case (#up) {
-            let updatedOpinion = {
-              id = opinion.id;
-              content = opinion.content;
-              timestamp = opinion.timestamp;
-              media = opinion.media;
-              upvotes = opinion.upvotes + 1;
-              downvotes = opinion.downvotes;
-              parentId = opinion.parentId;
-            };
-            opinions.put(opinionId, updatedOpinion);
-          };
-          case (#down) {
-            let updatedOpinion = {
-              id = opinion.id;
-              content = opinion.content;
-              timestamp = opinion.timestamp;
-              media = opinion.media;
-              upvotes = opinion.upvotes;
-              downvotes = opinion.downvotes + 1;
-              parentId = opinion.parentId;
-            };
-            opinions.put(opinionId, updatedOpinion);
-          };
-        };
-        
-        // Record the user's vote
-        let updatedVotes = Array.append(
-          userVotesList, 
-          [{ opinionId = opinionId; vote = vote }]
-        );
-        userVotes.put(caller, updatedVotes);
+        // Update the opinion in the HashMap
+        opinions.put(opinionId, updatedOpinion);
       };
     };
   };
