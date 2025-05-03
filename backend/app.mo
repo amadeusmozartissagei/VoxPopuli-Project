@@ -59,7 +59,7 @@ actor AnonymousOpinions {
   stable var userPointsEntries: [(Principal, UserPointsTracker)] = [];
 
   // Optimized LLM content moderation
-  let defaultPrompt = "Analyze this text. Return 1 if it contains insults, 0 otherwise. Only respond with 0 or 1.";
+  let defaultPrompt = "analisa text ini, dan berikan output 1 jika termasuk hinaan dan berikan output 0 jika tidak terindikasi hinaan. hanya beri saya input 0 atau 1.";
 
   // Efficient initialization of user points
   private func initUserPoints(principal: Principal) : UserPointsTracker {
