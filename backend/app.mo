@@ -7,125 +7,151 @@ import Iter "mo:base/Iter";
 import Hash "mo:base/Hash";
 import Error "mo:base/Error";
 import Blob "mo:base/Blob";
-import List "mo:base/List";
 import Principal "mo:base/Principal";
 import Array "mo:base/Array"; 
-import Option "mo:base/Option";
+import Buffer "mo:base/Buffer";
 
 actor AnonymousOpinions {
-  // Type for storing media
-  type MediaType = {
-    #image;
-    #video;
+  // Consolidated type definitions
+  type MediaType = { #image; #video };
+  type Media = { mediaType: MediaType; content: Blob };
+  type Vote = { #up; #down };
+  
+  type UserPointsTracker = {
+    totalPoints: Nat;
+    remainingPoints: Nat;
   };
-
-  type Media = {
-    mediaType: MediaType;
-    content: Blob;
-  };
-
-  // Type for storing votes
-  type Vote = {
-    #up;
-    #down;
-  };
-
-  // Type for storing opinions with votes and replies
+  
   type Opinion = {
     id: Nat;
     content: Text;
+    // author: Principal;
     timestamp: Time.Time;
     media: ?Media;
     upvotes: Nat;
     downvotes: Nat;
-    parentId: ?Nat; // Optional parent ID for replies
+    parentId: ?Nat;
   };
-
-  // Type for tracking user votes
+  
   type UserVote = {
     opinionId: Nat;
     vote: Vote;
   };
 
-  // Stable variables for persistence across upgrades
+  // Optimized constants
+  let CONFIG = {
+    POST_POINTS = { cost = 7; min = 7 };
+    REPLY_POINTS = { earned = 5; cost = 0 };
+    DEFAULT_INITIAL_POINTS : Nat = 50;
+    MAX_INPUT_LENGTH : Nat = 280;
+    MAX_REPLY_DEPTH : Nat = 2;
+  };
+
+  // Efficient data structures
+  let opinions = HashMap.HashMap<Nat, Opinion>(10, Nat.equal, Hash.hash);
+  let userVotes = HashMap.HashMap<Principal, [UserVote]>(10, Principal.equal, Principal.hash);
+  let userPoints = HashMap.HashMap<Principal, UserPointsTracker>(10, Principal.equal, Principal.hash);
+
+  // Persistent state variables
   stable var nextId: Nat = 0;
   stable var opinionsEntries: [(Nat, Opinion)] = [];
   stable var userVotesEntries: [(Principal, [UserVote])] = [];
-  
-  // Use HashMap for more efficient lookups by ID
-  let opinions = HashMap.fromIter<Nat, Opinion>(
-    opinionsEntries.vals(), 
-    10, 
-    Nat.equal, 
-    Hash.hash
-  );
+  stable var userPointsEntries: [(Principal, UserPointsTracker)] = [];
 
-  // Track user votes to prevent multiple votes on the same opinion
-  let userVotes = HashMap.fromIter<Principal, [UserVote]>(
-    userVotesEntries.vals(),
-    10,
-    Principal.equal,
-    Principal.hash
-  );
+  // Optimized LLM content moderation
+  let defaultPrompt = "Analyze this text. Return 1 if it contains insults, 0 otherwise. Only respond with 0 or 1.";
 
-  // LLM configuration
-  let defaultPrompt = "analisa text ini, dan berikan output 1 jika termasuk hinaan dan berikan output 0 jika tidak terindikasi hinaan. hanya beri saya input 0 atau 1.";
-  let MAX_INPUT_LENGTH = 280;
-
-  // Check content using LLM
-  public func checkContentWithLLM(content: Text) : async Bool {
-    if (Text.size(content) > MAX_INPUT_LENGTH) {
-      throw Error.reject("Error: Input exceeds 280 character limit");
+  // Efficient initialization of user points
+  private func initUserPoints(principal: Principal) : UserPointsTracker {
+    let pointsTracker : UserPointsTracker = {
+      totalPoints = CONFIG.DEFAULT_INITIAL_POINTS;
+      remainingPoints = CONFIG.DEFAULT_INITIAL_POINTS;
     };
-    
-    let fullPrompt = defaultPrompt # " " # content;
-    let result = await LLM.prompt(#Llama3_1_8B, fullPrompt);
-    
-    // Check if result contains "1" which indicates inappropriate content
-    return Text.contains(result, #text "1");
+    userPoints.put(principal, pointsTracker);
+    pointsTracker
   };
 
-  // Simple filter function as backup
-  private func containsInappropriateContent(text: Text) : Bool {
-    let lowercaseText = Text.toLowercase(text);
-    
-    // Define a list of inappropriate words to filter
+  // Combined content moderation function
+  private func moderateContent(content: Text) : async Bool {
+    if (Text.size(content) > CONFIG.MAX_INPUT_LENGTH) {
+      throw Error.reject("Input exceeds character limit");
+    };
+
+    // Simple word filter
     let inappropriateWords = ["bajingan", "asu", "kontol"];
+    let lowercaseContent = Text.toLowercase(content);
     
-    for (word in inappropriateWords.vals()) {
-      if (Text.contains(lowercaseText, #text word)) {
-        return true;
-      };
+    if (Array.filter<Text>(inappropriateWords, func(word: Text) : Bool { 
+      Text.contains(lowercaseContent, #text word) 
+    }).size() > 0) {
+      return true;
     };
-    
-    return false;
+
+    // LLM moderation (with optional error handling)
+    try {
+      let fullPrompt = defaultPrompt # " " # content;
+      let result = await LLM.prompt(#Llama3_1_8B, fullPrompt);
+      
+      return Text.contains(result, #text "1");
+    } catch (e) {
+      // Fallback to simple word filter if LLM fails
+      return false;
+    };
   };
 
-  // Modified postOpinion function with LLM content moderation
-  public shared(msg) func postOpinion(content: Text, media: ?Media, parentId: ?Nat) : async Nat {
+  // Centralized points management
+  private func updatePoints(
+    principal: Principal, 
+    earned: Nat, 
+    spent: Nat
+  ) : UserPointsTracker {
+    let currentTracker = switch (userPoints.get(principal)) {
+      case null { initUserPoints(principal) };
+      case (?tracker) { tracker };
+    };
+
+    let updatedTracker : UserPointsTracker = {
+      totalPoints = currentTracker.totalPoints + earned - spent;
+      remainingPoints = currentTracker.remainingPoints + earned - spent;
+    };
+
+    userPoints.put(principal, updatedTracker);
+    updatedTracker
+  };
+
+  // Advanced opinion posting with comprehensive checks
+  public shared(msg) func postOpinion(
+    content: Text, 
+    media: ?Media, 
+    parentId: ?Nat
+  ) : async Nat {
+    let caller = msg.caller;
+    
+    // Comprehensive validation
     if (Text.size(content) == 0) {
       throw Error.reject("Opinion content cannot be empty");
     };
-    
-    // First check with simple filter
-    if (containsInappropriateContent(content)) {
-      throw Error.reject("Opinion contains inappropriate content");
+
+    // Points and permission check
+    let pointsTracker = updatePoints(caller, 0, CONFIG.POST_POINTS.cost);
+    if (pointsTracker.remainingPoints < CONFIG.POST_POINTS.min) {
+      throw Error.reject("Insufficient points to post opinion");
     };
-    
-    // Then check with LLM for more advanced detection
-    let isInappropriate = await checkContentWithLLM(content);
+
+    // Content moderation
+    let isInappropriate = await moderateContent(content);
     if (isInappropriate) {
-      throw Error.reject("Opinion contains inappropriate content detected by AI");
+      throw Error.reject("Inappropriate content detected");
     };
-    
-    // If this is a reply, verify parent exists
+
+    // Optional parent opinion validation
     switch (parentId) {
       case (?pid) {
-        switch (opinions.get(pid)) {
-          case null {
-            throw Error.reject("Parent opinion does not exist");
-          };
-          case _ {};
+        let ?parentOpinion = opinions.get(pid) else throw Error.reject("Invalid parent opinion");
+        
+        // Check reply depth
+        if (parentOpinion.parentId != null and parentOpinion.parentId != null) {
+          throw Error.reject("Maximum reply depth reached");
         };
       };
       case null {};
@@ -134,6 +160,7 @@ actor AnonymousOpinions {
     let newOpinion: Opinion = {
       id = nextId;
       content = content;
+      // author = caller;
       timestamp = Time.now();
       media = media;
       upvotes = 0;
@@ -146,164 +173,98 @@ actor AnonymousOpinions {
     return newOpinion.id;
   };
 
-  // Helper function to find a vote in a user's vote list
-  private func findVote(votes: [UserVote], opinionId: Nat) : ?(UserVote, Nat) {
-    var index = 0;
-    for (vote in votes.vals()) {
-      if (vote.opinionId == opinionId) {
-        return ?(vote, index);
-      };
-      index += 1;
-    };
-    null
-  };
-
-  // Improved Vote on an opinion (upvote or downvote)
+  // Enhanced voting mechanism
   public shared(msg) func voteOnOpinion(opinionId: Nat, vote: Vote) : async () {
     let caller = msg.caller;
-    
-    // Check if opinion exists
-    switch (opinions.get(opinionId)) {
+    let opinion = switch (opinions.get(opinionId)) {
+      case null { throw Error.reject("Opinion not found") };
+      case (?op) { op };
+    };
+
+    let userVotesList = switch (userVotes.get(caller)) {
+      case null { [] };
+      case (?votes) { votes };
+    };
+
+    let (updatedOpinion, updatedVotes) = switch (
+      Array.find(userVotesList, func(v: UserVote) : Bool { v.opinionId == opinionId })
+    ) {
       case null {
-        throw Error.reject("Opinion does not exist");
+        // New vote
+        let newVote = { opinionId; vote };
+        let newOpinion = switch (vote) {
+          case (#up) { { opinion with upvotes = opinion.upvotes + 1 } };
+          case (#down) { { opinion with downvotes = opinion.downvotes + 1 } };
+        };
+        (newOpinion, Array.append(userVotesList, [newVote]))
       };
-      case (?opinion) {
-        // Get user's existing votes
-        let userVotesList = switch (userVotes.get(caller)) {
-          case null { [] };
-          case (?votes) { votes };
+      case (?existingVote) {
+        // Vote change logic
+        let newOpinion = switch (existingVote.vote, vote) {
+          case (#up, #down) { 
+            { opinion with upvotes = opinion.upvotes - 1; downvotes = opinion.downvotes + 1 } 
+          };
+          case (#down, #up) { 
+            { opinion with upvotes = opinion.upvotes + 1; downvotes = opinion.downvotes - 1 } 
+          };
+          case _ { opinion };
         };
         
-        // Find existing vote for this opinion
-        let existingVoteResult = findVote(userVotesList, opinionId);
+        let updatedVotes = Array.map(userVotesList, func(v: UserVote) : UserVote {
+          if (v.opinionId == opinionId) { { opinionId; vote } } else { v }
+        });
         
-        // Updated opinion with modified vote counts
-        var updatedOpinion = opinion;
-        
-        switch (existingVoteResult) {
-          case null {
-            // New vote: increment appropriate counter
-            updatedOpinion := switch (vote) {
-              case (#up) { 
-                { opinion with upvotes = opinion.upvotes + 1 } 
-              };
-              case (#down) { 
-                { opinion with downvotes = opinion.downvotes + 1 } 
-              };
-            };
-            
-            // Add new vote to user's vote list
-            let updatedVotes = Array.append(
-              userVotesList, 
-              [{ opinionId = opinionId; vote = vote }]
-            );
-            userVotes.put(caller, updatedVotes);
-          };
-          case (?(existingVote, index)) {
-            // If vote is the same, do nothing
-            if (existingVote.vote == vote) return;
-            
-            // Change vote: adjust counters
-            updatedOpinion := switch (existingVote.vote, vote) {
-              case (#up, #down) { 
-                { opinion with 
-                  upvotes = opinion.upvotes - 1; 
-                  downvotes = opinion.downvotes + 1 
-                } 
-              };
-              case (#down, #up) { 
-                { opinion with 
-                  upvotes = opinion.upvotes + 1; 
-                  downvotes = opinion.downvotes - 1 
-                } 
-              };
-              case _ { opinion }; // Impossible case, but needed for exhaustiveness
-            };
-            
-            // Update user's vote
-            let updatedVotes = Array.tabulate<UserVote>(
-              userVotesList.size(), 
-              func(i: Nat) : UserVote { 
-                if (i == index) {
-                  {
-                    opinionId = opinionId;
-                    vote = vote;
-                  }
-                } else {
-                  userVotesList[i] 
-                }
-              }
-            );
-            userVotes.put(caller, updatedVotes);
-          };
-        };
-        
-        // Update the opinion in the HashMap
-        opinions.put(opinionId, updatedOpinion);
+        (newOpinion, updatedVotes)
       };
     };
+
+    opinions.put(opinionId, updatedOpinion);
+    userVotes.put(caller, updatedVotes);
   };
 
-  // Query function to get all top-level opinions (not replies)
-  public query func getAllOpinions() : async [Opinion] {
-    Iter.toArray(
-      Iter.filter(
-        opinions.vals(), 
-        func (opinion: Opinion): Bool { 
-          switch (opinion.parentId) {
-            case null { true };
-            case _ { false };
-          }
-        }
-      )
-    );
-  };
-
-  // Query function to get an opinion by ID
-  public query func getOpinion(id: Nat) : async ?Opinion {
-    opinions.get(id);
-  };
-  
-  // Get replies to a specific opinion
-  public query func getReplies(opinionId: Nat) : async [Opinion] {
-    Iter.toArray(
-      Iter.filter(
+  // Advanced querying functions
+  public query func getOpinionThread(opinionId: Nat) : async {
+    opinion: ?Opinion;
+    replies: [Opinion];
+  } {
+    {
+      opinion = opinions.get(opinionId);
+      replies = Iter.toArray(Iter.filter(
         opinions.vals(),
-        func (opinion: Opinion): Bool {
-          switch (opinion.parentId) {
-            case (?pid) { pid == opinionId };
-            case null { false };
-          }
+        func(op: Opinion) : Bool { 
+          op.parentId == ?opinionId 
         }
-      )
-    );
+      ));
+    }
   };
-  
-  // Get a user's vote on a specific opinion
-  public query(msg) func getUserVote(opinionId: Nat) : async ?Vote {
-    let caller = msg.caller;
-    
-    switch (userVotes.get(caller)) {
-      case null { null };
-      case (?votes) {
-        for (vote in votes.vals()) {
-          if (vote.opinionId == opinionId) {
-            return ?vote.vote;
-          };
-        };
-        null;
-      };
-    };
+
+  // User points retrieval
+  public query func getUserPoints(principal: Principal) : async ?UserPointsTracker {
+    userPoints.get(principal)
   };
-  
-  // System functions for data persistence
+
+  // System upgrade management
   system func preupgrade() {
     opinionsEntries := Iter.toArray(opinions.entries());
     userVotesEntries := Iter.toArray(userVotes.entries());
+    userPointsEntries := Iter.toArray(userPoints.entries());
   };
 
   system func postupgrade() {
+    for ((id, opinion) in opinionsEntries.vals()) {
+      opinions.put(id, opinion);
+    };
+
+    for ((principal, votes) in userVotesEntries.vals()) {
+      userVotes.put(principal, votes);
+    };
+
+    for ((principal, pointsTracker) in userPointsEntries.vals()) {
+      userPoints.put(principal, pointsTracker);
+    };
+
     opinionsEntries := [];
     userVotesEntries := [];
+    userPointsEntries := [];
   };
 }
